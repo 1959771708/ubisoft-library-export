@@ -1,0 +1,69 @@
+{
+  "_help": "育碧库存导出项目的事实清单配置。gen_facts.cjs 与 check_docs.cjs 只读这一个文件。",
+  "project": {
+    "packageJson": "package.json",
+    "displayNamePath": "name",
+    "fields": [
+      { "label": "版本", "path": "version" },
+      { "label": "许可证", "path": "license" }
+    ],
+    "dependencies": []
+  },
+  "data": {
+    "file": "",
+    "collections": [],
+    "primary": null,
+    "flags": []
+  },
+  "verify": [
+    {
+      "script": "tools/selftest.cjs",
+      "label": "自测台",
+      "patterns": { "total": "TOTAL=(\\d+)", "fail": "FAIL=(\\d+)" },
+      "failKeys": ["fail"]
+    }
+  ],
+  "build": {
+    "command": "npm.cmd",
+    "args": ["run", "build"],
+    "distDir": "dist",
+    "summaryPattern": "SUMMARY version=(\\S+) bytes=(\\d+)",
+    "expectedWarnings": []
+  },
+  "snapshotDir": ".scratch",
+  "docs": {
+    "handwritten": ["README.md", "docs/DOC-CONTRACT.md"],
+    "requireInReadme": ["docs/FACTS.md", "docs/DOC-CONTRACT.md", "只描述当前状态"],
+    "pathPrefixes": ["tools", "docs"],
+    "legacy": [
+      { "label": "历史轮次章节", "pattern": "^##\\s*第[一二三四五六七八九十百]+轮", "flags": "m" }
+    ],
+    "copied": [
+      { "label": "校验项数", "pattern": "(?<!\\d)TOTAL=\\d+" }
+    ],
+    "specOk": {
+      "版本号字面量": "版本号在 @version 与 package.json 各出现一次，属规格而非实测数字"
+    },
+    "bakedNumbers": [],
+    "assetRules": [],
+    "codeAssertions": [
+      {
+        "label": "脚本必须声明 connect.ubisoft.com 匹配",
+        "file": "ubisoft-library-export.user.js",
+        "match": "@match\\s+https://connect\\.ubisoft\\.com/",
+        "docIncludes": "connect.ubisoft.com"
+      },
+      {
+        "label": "脚本不得申请 GM 权限（纯页面内 fetch）",
+        "file": "ubisoft-library-export.user.js",
+        "notMatch": "@grant\\s+(?!none)\\w"
+      },
+      {
+        "label": "自测台必须覆盖 401 换票路径",
+        "file": "tools/selftest.cjs",
+        "match": "401",
+        "docIncludes": "401"
+      }
+    ]
+  }
+}

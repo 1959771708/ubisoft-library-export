@@ -1,0 +1,11 @@
+# 本地导出产物（含账号信息，不要提交）
+ubisoft-library-*.json
+ubisoft-library-*.csv
+*.local.*
+
+# 构建产物与事实快照
+dist/
+.scratch/
+node_modules/
+.DS_Store
+Thumbs.db

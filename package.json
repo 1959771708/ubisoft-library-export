@@ -1,0 +1,15 @@
+{
+  "name": "ubisoft-library-export",
+  "version": "1.0.0",
+  "private": true,
+  "description": "导出 Ubisoft Connect 账号的完整游戏库存（权益口径），输出 JSON 供第三方工具导入",
+  "scripts": {
+    "build": "node tools/build.cjs",
+    "test": "node tools/selftest.cjs",
+    "facts": "node tools/gen_facts.cjs",
+    "check": "node tools/check_docs.cjs",
+    "verify": "node tools/build.cjs && node tools/selftest.cjs"
+  },
+  "license": "CC-BY-4.0",
+  "author": "1959771708"
+}

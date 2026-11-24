@@ -1,0 +1,13 @@
+# 统一用 LF，避免跨平台换行差异导致 diff 噪音
+* text=auto eol=lf
+
+# 油猴脚本必须是纯 LF（部分安装器对 CRLF 解析有差异）
+*.user.js text eol=lf
+*.js        text eol=lf
+*.md        text eol=lf
+*.json      text eol=lf
+
+# 二进制
+*.png binary
+*.jpg binary
+*.ico binary
