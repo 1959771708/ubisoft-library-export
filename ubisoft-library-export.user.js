@@ -2,7 +2,7 @@
 // @name         育碧库存导出
 // @name:en      Ubisoft Library Export
 // @namespace    https://github.com/1959771708/ubisoft-library-export
-// @version      1.0.2
+// @version      1.0.4
 // @description  导出 Ubisoft Connect 账号的完整游戏库存（权益口径），输出 JSON 供第三方工具导入
 // @description:en  Export your complete Ubisoft Connect library, based on owned game entitlements.
 // @author       1959771708
@@ -12,6 +12,10 @@
 // @updateURL    https://raw.githubusercontent.com/1959771708/ubisoft-library-export/main/ubisoft-library-export.user.js
 // @downloadURL  https://raw.githubusercontent.com/1959771708/ubisoft-library-export/main/ubisoft-library-export.user.js
 // @match        https://connect.ubisoft.com/*
+// @match        https://*.ubisoft.com/*
+// @match        https://ubisoft.com/*
+// @match        https://*.ubisoft.com.cn/*
+// @match        https://ubisoft.com.cn/*
 // @grant        none
 // @run-at       document-idle
 // @noframes
@@ -30,26 +34,37 @@
     // 不带 appId 返回 invalid:true，带 genomeId 也返回 invalid:true）。
     // 根路径 https://connect.ubisoft.com/ 会 301 到官网营销页，也不是登录页。
     //
-    // 必须显式给 nexturl，否则登录成功后 SPA 跳到它的默认值 https://ubisoft.com，
-    // 而那个域名会按访问者 IP 落到区域站（用美国代理时是 www.ubisoft.com/en-us/…），
-    // 本脚本只在这一个域名上运行，于是在区域站看不到导出按钮。
-    // 实测 nexturl 的校验只要求「URL 合法 + 主机在 ubisoft.com 白名单内」，所以指回本域的
-    // /login 就能通过；而 /login 是该 SPA 根路由里唯一可停留的页面（根路由只有
-    // login / create / **→login 三条，其它路径都会被重定向回登录页）。
-    // 也实测了不会死循环：普通浏览器走 RedirectToNextUrl 的「未分区」分支，直接
-    // location.href = nexturl，不写 skipLoginFlowsOnLoad，因此回到 /login 只会正常渲染。
+    // 关于代理/海外：登录成功默认跳 https://ubisoft.com，那个域名按 IP 落到区域站
+    // （美国代理时是 www.ubisoft.com/en-us 之类）。实测过的三条路都不通：
+    //   ① 显式 nexturl 钉回 connect 域 —— 只保得住**一次**跳转。我们设的 nexturl 自身
+    //      不带 nexturl 参数，落地后 query 只剩 appId，页面上再点一次登录就回落
+    //      _defaultNextUrl="https://ubisoft.com"，照样被甩到区域站。
+    //   ② /auth.html 当落点 —— 那是给客户端/iframe 用的 SDK 页，无 operation 参数时
+    //      执行 `window.top.location.href = nextUrl`，默认还是 ubisoft.com。
+    //   ③ 把 connect 域的 SSO 拿票接口跨域打 —— 只对 connect.ubisoft.com 回 ACAO。
+    // 正解是**不跟它抢落点**：脚本同时覆盖区域站。区域站页面里嵌了 connect 的
+    // WebAuth SDK iframe，会把票写进宿主页自己的 localStorage —— 所以代理场景下
+    // 直接在区域站上导出即可，localStorage 里的票虽然属于另一个 appId（直接调库存
+    // 接口会 401），但换票一次就能拿到本脚本 APP_ID 的票（实测 200）。
     const LOGIN_APP_ID = '1068ef52-dfd2-4e62-8ac9-37a47e6c0b78';
     const LOGIN_PATH = '/login?appId=' + LOGIN_APP_ID;
     const LOGIN_ORIGIN = 'https://connect.ubisoft.com';
-    const LOGIN_URL = LOGIN_ORIGIN + LOGIN_PATH
-        + '&nexturl=' + encodeURIComponent(LOGIN_ORIGIN + LOGIN_PATH);
+    const LOGIN_URL = LOGIN_ORIGIN + LOGIN_PATH;
 
     const ENT_URL = 'https://api-ubiservices.ubi.com/v1/profiles/me/global/ubiconnect/entitlement/api/entitlements';
     const SESSION_URL = 'https://public-ubiservices.ubi.com/v2/profiles/sessions';
     const GRAPHQL_URL = 'https://public-ubiservices.ubi.com/v1/profiles/me/uplay/graphql';
 
-    // 网页登录把整份会话写进 localStorage 的这个键（前缀 PROD 来自站点 env 配置）。
-    const SESSION_KEYS = ['PRODloginData', 'loginData'];
+    // 网页登录把整份会话写进 localStorage，但**两个域的形状不一样**（都实测过）：
+    //   connect.ubisoft.com  → PRODloginData = {ticket, sessionId, userId, nameOnPlatform, email, expirationDate(ms)}
+    //   区域站 www.ubisoft.com → PRODOverlayConnectLoginData = {opId, ticket, user_id, sessionId, expiration(ISO 串)}
+    //                          另有 PRODloginData = {opId:"GetTicket", status:"ok", payload:{ticket, userId, sessionId, expiration}}
+    // 区域站这两份里的票属于 SDK 的 appId，直接调库存接口会 401，靠 withAuthRetry 换票即可。
+    const SESSION_KEYS = [
+        'PRODloginData',
+        'loginData',
+        'PRODOverlayConnectLoginData'
+    ];
 
     // 实测：api-ubiservices / public-ubiservices 对 https://connect.ubisoft.com 的预检都回
     // Access-Control-Allow-Origin: https://connect.ubisoft.com，且允许
@@ -100,11 +115,21 @@
     }
 
     // ── 会话 ────────────────────────────────────────────────────────────────
+    // 把过期时间统一成毫秒数：connect 域给的是数字毫秒，区域站给的是 ISO 字符串。
+    function toMillis(raw) {
+        if (raw === null || raw === undefined || raw === '') return null;
+        const ms = Number(raw);
+        if (isFinite(ms) && ms > 0) return ms;
+        const parsed = Date.parse(String(raw));
+        return isFinite(parsed) && parsed > 0 ? parsed : null;
+    }
+
     function readStoredSession() {
-        const out = {
+        const empty = {
             key: null, ticket: null, sessionId: null, userId: null,
             nameOnPlatform: null, email: null, expirationDate: null
         };
+        const candidates = [];
         for (let i = 0; i < SESSION_KEYS.length; i += 1) {
             const key = SESSION_KEYS[i];
             let raw = null;
@@ -113,16 +138,36 @@
             let parsed = null;
             try { parsed = JSON.parse(raw); } catch (e) { parsed = null; }
             if (!parsed || typeof parsed !== 'object') continue;
-            out.key = key;
-            out.ticket = parsed.ticket || out.ticket;
-            out.sessionId = parsed.sessionId || out.sessionId;
-            out.userId = parsed.userId || out.userId;
-            out.nameOnPlatform = parsed.nameOnPlatform || out.nameOnPlatform;
-            out.email = parsed.email || parsed.emailAddress || out.email;
-            out.expirationDate = parsed.expirationDate || out.expirationDate;
-            if (out.ticket && out.sessionId) break;
+            // 区域站的 PRODloginData 把真正的内容套在 payload 里
+            const src = (parsed.payload && typeof parsed.payload === 'object') ? parsed.payload : parsed;
+            const ticket = src.ticket || null;
+            const sessionId = src.sessionId || null;
+            if (!ticket || !sessionId) continue;
+            candidates.push({
+                key: key,
+                ticket: ticket,
+                sessionId: sessionId,
+                userId: src.userId || src.user_id || src.profileId || null,
+                nameOnPlatform: src.nameOnPlatform || src.username || null,
+                email: src.email || src.emailAddress || null,
+                expirationDate: toMillis(src.expirationDate) || toMillis(src.expiration)
+            });
         }
-        return out;
+        if (!candidates.length) return empty;
+        // 区域站同时存在两份：PRODloginData.payload 里的那张经常会比 overlay 的旧，
+        // 所以优先没用过期的那张；全都过期就返回第一张，让上层报「会话已过期」。
+        for (let i = 0; i < candidates.length; i += 1) {
+            if (!isSessionExpired(candidates[i])) return candidates[i];
+        }
+        return candidates[0];
+    }
+
+    // 会话是否已过期。expirationDate 可能是毫秒数、ISO 字符串，也可能缺失；
+    // 缺失或非法时不做断言（交给服务端 401）。
+    function isSessionExpired(session) {
+        const ms = toMillis(session && session.expirationDate);
+        if (ms === null) return false;
+        return ms <= Date.now();
     }
 
     function authHeaders(session) {
@@ -135,7 +180,9 @@
         };
     }
 
-    // 网页登录拿到的 ticket 属于登录 appId，API 侧可能不认；换票一次后重试。
+    // 网页拿到的 ticket 属于登录 appId（区域站还是 SDK 的 appId），API 侧不认；
+    // 换票一次就拿到本脚本 APP_ID 的票。实测：区域站的票直接调库存接口 401，
+    // 换票后 200。
     async function refreshSession(session) {
         const r = await httpJson(SESSION_URL, {
             method: 'POST',
@@ -146,6 +193,9 @@
         if (j.ticket) session.ticket = j.ticket;
         if (j.sessionId) session.sessionId = j.sessionId;
         if (j.userId) session.userId = j.userId;
+        if (j.nameOnPlatform) session.nameOnPlatform = j.nameOnPlatform;
+        const exp = toMillis(j.expirationDate) || toMillis(j.expiration);
+        if (exp) session.expirationDate = exp;
         if (!j.ticket) throw new Error('换票没有返回 ticket，无法继续');
         return r;
     }
@@ -331,9 +381,17 @@
             throw new Error('没有找到登录会话。请先在本页登录（' + LOGIN_URL + '），登录后再点导出。'
                 + '（读取的 localStorage 键：' + SESSION_KEYS.join(' / ') + '）');
         }
+        // 残留的旧票也能"看起来有会话"，必须先失效判定，否则会拿过期票去导出。
+        const expired = isSessionExpired(s);
+        if (expired) {
+            throw new Error('登录会话已过期（expirationDate ' + new Date(s.expirationDate).toISOString()
+                + '）。请在本页重新登录（' + LOGIN_URL + '），登录完成后再点导出。');
+        }
 
         ui.progress(5, '读取权益');
-        ui.log('会话来源：localStorage["' + s.key + '"]，用户 ' + (s.nameOnPlatform || s.userId || '未知'));
+        const host = (typeof location !== 'undefined' && location && location.host) ? location.host : '(未知域)';
+        ui.log('会话来源：localStorage["' + s.key + '"]（' + host + '），用户 '
+            + (s.nameOnPlatform || s.userId || '未知'));
 
         const t0 = Date.now();
         const ent = await fetchEntitlements(s, function (line) { ui.log('  ' + line); notes.push(line); });
@@ -600,7 +658,10 @@
             collapseBySpaceId: collapseBySpaceId,
             collectPlatforms: collectPlatforms,
             titleErrorCodeOf: titleErrorCodeOf,
+            isSessionExpired: isSessionExpired,
+            toMillis: toMillis,
             runExport: runExport,
+            SESSION_KEYS: SESSION_KEYS,
             LOGIN_URL: LOGIN_URL,
             LOGIN_PATH: LOGIN_PATH,
             LOGIN_ORIGIN: LOGIN_ORIGIN,

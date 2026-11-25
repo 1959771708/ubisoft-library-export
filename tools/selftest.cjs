@@ -274,15 +274,20 @@ function testPureFunctions() {
         assertEqual(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(api.LOGIN_APP_ID), true, 'appId 是合法 GUID');
     });
 
-    // 回归：默认 nexturl 是 https://ubisoft.com，那个域名按 IP 落到区域站（美国代理 → 美区），
-    // 脚本只在本域运行，于是在区域站没有按钮。必须显式把 nexturl 钉回本域。
-    check('登录 URL 把 nexturl 钉回本域，避免按 IP 落到区域站', function () {
+    // 回归：默认 nexturl 是 https://ubisoft.com，那个域名按 IP 落到区域站（美国代理 → 美区）。
+    // 实测 nexturl 只保得住一次跳转（我们设的 nexturl 自身不带 nexturl 参数，落地后再登录就回落默认值），
+    // 所以策略改成「让脚本覆盖区域站」，登录 URL 不再塞 nexturl —— 塞了反而让人以为能钉住落点。
+    check('登录 URL 不再试图用 nexturl 钉住落点', function () {
         const url = new URL(api.LOGIN_URL);
-        const nexturl = url.searchParams.get('nexturl');
-        assert(nexturl, '必须显式给 nexturl，否则默认跳到 ubisoft.com');
-        const target = new URL(nexturl);
-        assertEqual(target.origin, api.LOGIN_ORIGIN, 'nexturl 必须指回本域');
-        assertEqual(target.origin, url.origin, 'nexturl 与登录页同源');
+        assertEqual(url.searchParams.get('nexturl'), null, '不再设置 nexturl（它只保一次跳转，是假保护）');
+        assertEqual(url.origin, 'https://connect.ubisoft.com', '登录页仍在 connect 域');
+    });
+
+    check('脚本覆盖区域站，不再只匹配 connect 域', function () {
+        const head = fs.readFileSync(SCRIPT, 'utf8');
+        assert(head.indexOf('@match        https://*.ubisoft.com/*') !== -1, '@match 必须覆盖 ubisoft.com 子域（区域站）');
+        assert(head.indexOf('@match        https://connect.ubisoft.com/*') !== -1, '@match 仍要覆盖 connect 域');
+        assertEqual(api.SESSION_KEYS.indexOf('PRODOverlayConnectLoginData') !== -1, true, '必须读区域站的 overlay 会话键');
     });
 }
 
@@ -425,6 +430,125 @@ async function testRunExport() {
         assertEqual(env.api.JSON_LANG, 'en-US', '导出的 JSON_LANG 常量');
         const cjk = JSON.stringify(result).match(/[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/g);
         assertEqual(cjk, null, '成功路径的 JSON 也不能有中文');
+    });
+
+    // 浏览器里残留的旧票会让人以为"已登录"，实测中我也被它骗过一次。
+    // 过期必须明确拒绝，不能拿它去抓库。
+    await checkAsync('残留的过期票据必须拒绝导出，不发任何请求', async function () {
+        const env = makeSandbox({ store: { PRODloginData: SESSION }, routes: happyRoutes() });
+        const expiredSession = Object.assign(JSON.parse(SESSION), { expirationDate: Date.now() - 60000 });
+        let message = '';
+        try {
+            await env.api.runExport(expiredSession);
+        } catch (err) {
+            message = err.message;
+        }
+        assert(message.indexOf('过期') !== -1, '提示应说明会话已过期，实际：' + message);
+        assert(message.indexOf('connect.ubisoft.com') !== -1, '提示应给出重新登录地址');
+        assertEqual(env.calls.length, 0, '过期票据不发任何请求');
+        assertEqual(env.api.state.result, null, '不产出结果');
+    });
+
+    await checkAsync('isSessionExpired 的边界', async function () {
+        const api = makeSandbox({ store: {}, routes: [] }).api;
+        assertEqual(api.isSessionExpired({ expirationDate: Date.now() - 1000 }), true, '刚过期');
+        assertEqual(api.isSessionExpired({ expirationDate: Date.now() + 60000 }), false, '还有效');
+        assertEqual(api.isSessionExpired({ expirationDate: null }), false, '缺字段不断言');
+        assertEqual(api.isSessionExpired({}), false, '无字段不断言');
+        assertEqual(api.isSessionExpired({ expirationDate: 'not-a-date' }), false, '非法值不断言');
+        // 区域站给的是 ISO 字符串（实测 PRODOverlayConnectLoginData.expiration = "2026-11-25T09:41:00.8258425Z"）
+        assertEqual(api.isSessionExpired({ expirationDate: '2999-01-01T00:00:00Z' }), false, 'ISO 未来时间不算过期');
+        assertEqual(api.isSessionExpired({ expirationDate: '2000-01-01T00:00:00Z' }), true, 'ISO 过去时间算过期');
+    });
+
+    // 区域站（代理/海外场景）实测的 localStorage 形状，原样搬进来：
+    //   PRODOverlayConnectLoginData = {opId, ticket, user_id, sessionId, expiration(ISO)}
+    //   PRODloginData = {opId:"GetTicket", status:"ok", payload:{ticket,userId,sessionId,expiration}}
+    // 两者的票都属于别的 appId，直接调库存接口 401，必须换票后才能用。
+    const OVERLAY = JSON.stringify({
+        opId: 'GetTicket',
+        ticket: 'OV-TICKET',
+        user_id: 'u-overlay',
+        sessionId: 'S-overlay',
+        expiration: '2999-01-01T00:00:00.0000000Z'
+    });
+
+    const WRAPPED = JSON.stringify({
+        opId: 'GetTicket',
+        status: 'ok',
+        payload: {
+            ticket: 'WRAP-TICKET',
+            userId: 'u-wrapped',
+            sessionId: 'S-wrapped',
+            expiration: '2000-01-01T00:00:00.0000000Z'
+        }
+    });
+
+    check('readStoredSession 能读区域站两种形状，并跳过已过期的', function () {
+        const overlayOnly = makeSandbox({ store: { PRODOverlayConnectLoginData: OVERLAY } });
+        const a = overlayOnly.api.readStoredSession();
+        assertEqual(a.ticket, 'OV-TICKET', '读 overlay 的票');
+        assertEqual(a.userId, 'u-overlay', 'user_id 映射成 userId');
+        assertEqual(a.key, 'PRODOverlayConnectLoginData', '记录来源键');
+        assert(a.expirationDate > Date.now(), 'ISO 过期时间被解析成毫秒');
+
+        const wrapped = makeSandbox({ store: { PRODloginData: WRAPPED } });
+        const b = wrapped.api.readStoredSession();
+        assertEqual(b.ticket, 'WRAP-TICKET', '能钻进 payload 里取票');
+        assertEqual(b.userId, 'u-wrapped', 'payload 里的 userId');
+    });
+
+    check('区域站两份会话并存时，优先选没过期的那张', function () {
+        // PRODloginData 排在 SESSION_KEYS 前面，但它里面是过期票；必须跳到 overlay 那张。
+        const env = makeSandbox({ store: { PRODloginData: WRAPPED, PRODOverlayConnectLoginData: OVERLAY } });
+        const s = env.api.readStoredSession();
+        assertEqual(s.ticket, 'OV-TICKET', '不能因为顺序靠前就选过期票');
+        assertEqual(s.key, 'PRODOverlayConnectLoginData', '来源键是 overlay');
+    });
+
+    await checkAsync('区域站的票直接 401 时，换票后能正常导出', async function () {
+        const routes = [
+            {
+                url: '/v1/profiles/me/global/ubiconnect/entitlement/api/entitlements',
+                method: 'GET',
+                responses: [
+                    { status: 401, body: { errorCode: '2000', message: 'Unauthorized' } },
+                    { status: 200, body: { entitlements: ENTITLEMENTS } }
+                ]
+            },
+            {
+                url: '/v2/profiles/sessions',
+                method: 'POST',
+                status: 200,
+                body: {
+                    ticket: 'T2-EXCHANGED',
+                    sessionId: 'S2',
+                    userId: 'u-overlay',
+                    nameOnPlatform: 'RealPlayer',
+                    expiration: '2999-01-01T00:00:00.0000000Z'
+                }
+            },
+            { url: '/v1/profiles/me/uplay/graphql', method: 'POST', status: 200, body: function () { return graphqlBody(['A', 'E']); } }
+        ];
+        const env = makeSandbox({ store: { PRODOverlayConnectLoginData: OVERLAY }, routes });
+        const result = await env.api.runExport();
+
+        assertEqual(result.summary.gameCount, 3, '换票后拿到完整库存');
+        assertEqual(result.account.userId, 'u-overlay', '账号来自 localStorage');
+        assertEqual(result.account.nameOnPlatform, 'RealPlayer', '换票响应里的 nameOnPlatform 被采纳');
+        const sessionCall = env.calls[1];
+        assertEqual(sessionCall.headers.Authorization, 'Ubi_v1 t=OV-TICKET', '换票用的是区域站的票');
+        const retry = env.calls[2];
+        assertEqual(retry.headers.Authorization, 'Ubi_v1 t=T2-EXCHANGED', '重试用换来的票');
+    });
+
+    await checkAsync('toMillis 能同时吃毫秒数与 ISO 字符串', async function () {
+        const api = makeSandbox({ store: {} }).api;
+        assertEqual(api.toMillis(1900000000000), 1900000000000, '毫秒数原样返回');
+        assertEqual(api.toMillis('2999-01-01T00:00:00Z'), Date.parse('2999-01-01T00:00:00Z'), 'ISO 解析');
+        assertEqual(api.toMillis(null), null, 'null');
+        assertEqual(api.toMillis(''), null, '空串');
+        assertEqual(api.toMillis('乱码'), null, '非法串');
     });
 
     await checkAsync('runExport 未登录时给出可操作提示且不发请求', async function () {
