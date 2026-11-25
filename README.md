@@ -41,9 +41,19 @@
 1. 装 [Tampermonkey](https://www.tampermonkey.net/)（或 Violentmonkey）。
 2. 点上面的[一键安装](#一键安装)链接；手动安装的话，新建脚本把 [ubisoft-library-export.user.js](ubisoft-library-export.user.js) 整个粘进去保存。
 3. 登录育碧账号：打开 <https://connect.ubisoft.com/login?appId=1068ef52-dfd2-4e62-8ac9-37a47e6c0b78> 登录。
-4. 登录成功后页面会跳去 `ubisoft.com`（哪个区域取决于你的 IP）。**就在那个页面上操作**，脚本在区域站同样会跑起来。
+4. 登录成功后页面会跳去 `ubisoft.com`（哪个区域取决于你的 IP）。如果面板提示「这一页读不到登录会话」，点面板上的**「前往抓取页面」**，它会在当前标签页跳到抓取页。
 5. 页面右下角出现蓝色按钮「育碧库存导出」，点它。
 6. 等进度条走完，浏览器自动下载 `ubisoft-library-*.json`。
+
+### 为什么需要「前往抓取页面」
+
+`localStorage` 是**按域隔离**的：在 A 域登录拿到的会话，B 域读不到。育碧登录完成后的落地页由服务端按 IP 决定（用美国代理就落到 `www.ubisoft.com/en-us`），而这些落地页不保证会把会话写进自己域下的 localStorage —— 这就会让脚本读到空，报「没登录」或导出失败。
+
+能稳定读到会话的页面是 <https://zh-cn.ubisoft.com/>：它的服务端 HTML 里直接内联了育碧自己的 overlay 组件 `overlay.ubisoft.com/overlay-connect-integration/widget.js`，由它把票据写进宿主页的 `localStorage`（键 `PRODOverlayConnectLoginData`）；这一页还**没有 CSP**，不会被内容安全策略拦。相比之下 `www.ubisoft.com/en-us` 这类 Next.js 页面的服务端 HTML 里没有这个组件。
+
+所以流程是：**先在 `connect.ubisoft.com` 登录，再回到抓取页导出**。面板发现当前域读不到会话时会自动显示「前往抓取页面」按钮，一键跳过去；那一页如果还是读不到，说明登录本身没成功，按面板提示重新登录。
+
+面板上还有一个**「环境自检」**按钮：它用和真实导出完全相同的通道打一次库存接口，把「请求根本没发出去」「服务端回 401」「链路正常」三种情况进行区分，逐行写进面板日志。手机上开不了控制台，出问题时先点这个。
 
 也可以在任意 `ubisoft.com` 页面直接打开面板 —— 只要那个页面已经登录，脚本就能从站点自己的 localStorage 里读到会话。没登录时面板上有一个「去登录育碧账号（新标签页）」按钮，它在新标签页打开登录页，当前页不会被跳走，登录完关掉那个标签页回来点「开始导出」即可。
 
@@ -51,11 +61,11 @@
 
 ### 挂了代理 / 在海外也能用
 
-登录页默认的返回地址是 `https://ubisoft.com`，那个域名会按访问者 IP 落到区域站（例如用美国代理就跳 `www.ubisoft.com/en-us`）。**这不影响使用**：脚本同时覆盖 `ubisoft.com` 及其子域，落到哪个区域站都能导出。
+登录页默认的返回地址是 `https://ubisoft.com`，那个域名会按访问者 IP 落到区域站（例如用美国代理就跳 `www.ubisoft.com/en-us`）。落到哪里都不影响使用：脚本覆盖 `ubisoft.com` 及其子域，也覆盖 `ubisoft.com.cn`，在哪个区域站都能跑到；**只要在能读到会话的那一页上导出**（见上一节），代理和地区都不构成障碍。
 
-区域站页面里嵌着育碧自己的 WebAuth SDK，会把登录票据写进站点自己的 localStorage（键名 `PRODOverlayConnectLoginData`）。那张票属于站点自己的 appId，直接拿去调库存接口会被拒（401），脚本会自动换一次票（`POST /v2/profiles/sessions`）再读库——这条路径已在真实浏览器里跑通。
+区域站页面里嵌着育碧自己的 WebAuth 组件，会把登录票据写进站点自己的 localStorage（键名 `PRODOverlayConnectLoginData`）。那张票属于站点自己的 appId，直接拿去调库存接口会被拒（401），脚本会自动换一次票（`POST /v2/profiles/sessions`）再读库——这条路径已在真实浏览器里跑通。
 
-> 早期版本试过用 `nexturl` 参数把登录后的落地页钉回 `connect.ubisoft.com`，实测**只保得住一次跳转**：我们设的 nexturl 自身不再带 nexturl，落地后再登录一次就回落默认值，照样被甩到区域站。所以现在不跟它抢落点，改成直接覆盖区域站。
+> 早期版本试过用 `nexturl` 参数把登录后的落地页钉回 `connect.ubisoft.com`，实测**只保得住一次跳转**：我们设的 nexturl 自身不再带 nexturl，落地后再登录一次就回落默认值，照样被甩到区域站。所以现在不跟它抢落点，改成用「前往抓取页面」把用户带到确定能读到会话的页面。
 
 ### 为什么不能直接打开 `https://connect.ubisoft.com`
 
@@ -155,12 +165,14 @@
 
 ```bash
 npm run build     # 校验 @version 与 package.json 一致，产出 dist/
-npm test          # 自测台：vm 沙箱 + 假 fetch，覆盖换票/降级/分块
+npm test          # 自测台：vm 沙箱 + 假 fetch + DOM 桩，覆盖换票/降级/分块/界面
 npm run facts     # 重新生成 docs/FACTS.md
 npm run check     # 文档体检
 ```
 
-自测台不依赖浏览器：把用户脚本丢进 Node 的 vm 沙箱，用假的 `localStorage` 和 `fetch` 跑完整导出流程。覆盖的情形包括 401 换票后重试、换票仍失败时报错、标题接口 500 降级、未登录时不发请求、空库、300 条按 120 分块。
+自测台不依赖浏览器：把用户脚本丢进 Node 的 vm 沙箱，用假的 `localStorage` 和 `fetch` 跑完整导出流程。覆盖的情形包括 401 换票后重试、换票仍失败时报错、标题接口 500 降级、未登录时不发请求、空库、300 条按 120 分块，以及环境自检对「请求没发出去 / 401 / 2xx / 5xx」四种情况的分类结论。
+
+面板那一路也一起测了：自测台用一套最小 DOM 桩把界面真的挂起来，校验「该不该显示登录/前往抓取按钮」「自检报告是否成块写入且顺序正确」「网络层失败后是否自动跑自检」。这类问题导出流程照跑、只在界面上出错，不测就只能靠人眼。
 
 ## 文档
 

@@ -1,6 +1,6 @@
 # 事实清单（机器生成，请勿手改）
 
-> 生成时间：2026-11-25T07:20:52.278Z　生成命令：`node tools/gen_facts.cjs`
+> 生成时间：2026-11-25T13:52:44.340Z　生成命令：`node tools/gen_facts.cjs`
 >
 > **本文件是文档中所有数字的唯一来源。** README 与 docs/ 的手写部分不得重复抄写这里的数值，
 > 只能引用本文件。改代码后重跑生成器，再跑 `node tools/check_docs.cjs` 体检。
@@ -10,9 +10,9 @@
 
 | 项 | 值 | 来源 |
 | --- | --- | --- |
-| 本地版本 | `1.0.5` | package.json |
+| 本地版本 | `1.1.0` | package.json |
 | 对外名称 | ubisoft-library-export | package.json#name |
-| 版本 | 1.0.5 | package.json#version |
+| 版本 | 1.1.0 | package.json#version |
 | 许可证 | CC-BY-4.0 | package.json#license |
 
 ### 远端版本线
@@ -23,16 +23,16 @@
 
 | 脚本 | 结果 |
 | --- | --- |
-| `tools/selftest.cjs` | TOTAL=**23** FAIL=**0** |
+| `tools/selftest.cjs` | TOTAL=**38** FAIL=**0** |
 
 ## 构建产物（本次实测）
 
-汇总：1.0.5 / 35171
+汇总：1.1.0 / 46682
 
 | 文件 | 字节 |
 | --- | --- |
-| `dist/ubisoft-library-export.user.js` | 35171 |
-| **合计 1 个文件** | **35171** |
+| `dist/ubisoft-library-export.user.js` | 46682 |
+| **合计 1 个文件** | **46682** |
 
 构建警告：无
 

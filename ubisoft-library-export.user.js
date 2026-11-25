@@ -2,7 +2,7 @@
 // @name         育碧库存导出
 // @name:en      Ubisoft Library Export
 // @namespace    https://github.com/1959771708/ubisoft-library-export
-// @version      1.0.5
+// @version      1.1.0
 // @description  导出 Ubisoft Connect 账号的完整游戏库存（权益口径），输出 JSON 供第三方工具导入
 // @description:en  Export your complete Ubisoft Connect library, based on owned game entitlements.
 // @author       1959771708
@@ -66,6 +66,17 @@
         'PRODOverlayConnectLoginData'
     ];
 
+    // 会话按 **域** 隔离：localStorage 是每个 origin 一份。在 A 域登录、跑到 B 域导出，
+    // 脚本读到的永远是空 —— 这是「登录完被甩到别处就报没会话」的根源。
+    // 实测（2026-11-25）：zh-cn.ubisoft.com 的服务端 HTML 里直接内联了
+    //   https://overlay.ubisoft.com/overlay-connect-integration/widget.js
+    // 而且该页没有 CSP；www.ubisoft.com/en-us 这类 Next.js 页的服务端 HTML 里没有这个 widget，
+    // 只带 frame-ancestors。widget 里硬编码 key 为 "OverlayConnectLoginData"，
+    // 前缀取自 config.connectEnv（PROD），拼起来正是 PRODOverlayConnectLoginData。
+    // 所以「能稳定抓到会话」的页面就是下面这个区域站首页。
+    const CAPTURE_ORIGIN = 'https://zh-cn.ubisoft.com';
+    const CAPTURE_URL = CAPTURE_ORIGIN + '/';
+
     // 实测：api-ubiservices / public-ubiservices 对 https://connect.ubisoft.com 的预检都回
     // Access-Control-Allow-Origin: https://connect.ubisoft.com，且允许
     // authorization, ubi-appid, ubi-sessionid, content-type, ubi-localeCode
@@ -93,7 +104,11 @@
             res = await fetch(url, opts);
         } catch (err) {
             const msg = (err && err.message) ? err.message : String(err);
-            throw new Error(what + ' 请求失败（网络层）：' + msg);
+            const e = new Error(what + ' 请求失败（网络层）：' + msg);
+            // fetch 抛错意味着请求根本没发出去（浏览器在本地就拦了）。
+            // 这个标记让 UI 知道该自动跑一次环境自检 —— 它和「服务端回了 401」是两回事。
+            e.networkProblem = true;
+            throw e;
         }
         const text = await res.text();
         let json = null;
@@ -498,9 +513,144 @@
         download(baseName() + '.json', JSON.stringify(state.result, null, 2), 'application/json');
     }
 
+    // ── 环境自检 ────────────────────────────────────────────────────────────
+    // 「导出失败」在界面上都是一句话，但底下至少是三种完全不同的原因：
+    //   1. 请求根本没发出去 —— 浏览器/扩展/网络在本地就把 fetch 掐了（报 Failed to fetch）
+    //   2. 请求到了，服务端回 401/403 —— 票据问题。最常见的是读到了**别的域**留下的旧票，
+    //      因为 localStorage 按 origin 隔离，在 A 域登录、在 B 域导出必然读空或读到过期值
+    //   3. 请求到了也是 2xx，但内容不是预期的 JSON —— 脚本自己的问题
+    // 自检要做的事只有一件：把这三件事分开说清楚，让人不用猜。
+
+    function currentOrigin() {
+        if (typeof location === 'undefined' || !location) return null;
+        if (location.origin) return location.origin;
+        if (location.protocol && location.host) return location.protocol + '//' + location.host;
+        return null;
+    }
+
+    function hostOf(url) {
+        const m = /^https?:\/\/([^/?#]+)/i.exec(String(url || ''));
+        return m ? m[1] : String(url || '');
+    }
+
+    // 每个候选 key 到底有没有、里面有没有票。终端用户只需要知道打勾还是打叉。
+    function describeSessionKeys() {
+        const rows = [];
+        for (let i = 0; i < SESSION_KEYS.length; i += 1) {
+            const key = SESSION_KEYS[i];
+            let raw = null;
+            try { raw = localStorage.getItem(key); } catch (e) { raw = null; }
+            if (!raw) {
+                rows.push({ key: key, state: 'missing', text: '✗ 没有' });
+                continue;
+            }
+            let parsed = null;
+            try { parsed = JSON.parse(raw); } catch (e) { parsed = null; }
+            if (!parsed || typeof parsed !== 'object') {
+                rows.push({ key: key, state: 'broken', text: '⚠ 有值但不是 JSON' });
+                continue;
+            }
+            const src = (parsed.payload && typeof parsed.payload === 'object') ? parsed.payload : parsed;
+            if ((src.ticket || null) && (src.sessionId || null)) {
+                rows.push({ key: key, state: 'ok', text: '✓ 有票据' });
+            } else {
+                rows.push({ key: key, state: 'incomplete', text: '⚠ 有值但缺 ticket/sessionId' });
+            }
+        }
+        return rows;
+    }
+
+    // 用和真实导出**完全相同**的通道打一次权益接口：不设 credentials（与 httpJson 一致），
+    // 这样探到的就是真实链路的行为 —— 如果这里都到不了服务端，导出一定也到不了。
+    async function probeEntitlements(session) {
+        const headers = (session && session.ticket) ? authHeaders(session) : {
+            'Ubi-AppId': APP_ID,
+            'Ubi-LocaleCode': JSON_LANG
+        };
+        const started = Date.now();
+        try {
+            const res = await fetch(ENT_URL, { method: 'GET', headers: headers });
+            let bytes = 0;
+            try {
+                const text = await res.text();
+                bytes = text ? text.length : 0;
+            } catch (e) {
+                bytes = -1;
+            }
+            return {
+                reached: true,
+                status: res.status,
+                ok: !!res.ok,
+                ms: Date.now() - started,
+                bytes: bytes
+            };
+        } catch (err) {
+            return {
+                reached: false,
+                ms: Date.now() - started,
+                message: (err && err.message) ? err.message : String(err)
+            };
+        }
+    }
+
+    function envConclusion(probe, session, origin) {
+        if (!probe.reached) {
+            return '✗ 请求根本没发出去（' + probe.message + '）。这不是账号问题，也不是服务端问题，'
+                + '是浏览器在本地把请求拦下了：常见于广告拦截/隐私扩展、校园或公司网络、以及部分手机浏览器的省流模式。'
+                + '换一个浏览器或关掉拦截扩展再试。';
+        }
+        if (probe.status === 401 || probe.status === 403) {
+            return '请求到了服务端（HTTP ' + probe.status + '），是票据不被接受。'
+                + (session && session.ticket
+                    ? '当前读到的是「' + session.key + '」里的票，它可能已过期，或属于别的域。点「去登录育碧账号」重新登录，再回抓取页导出。'
+                    : '本页读不到任何票据。先点「前往抓取页面」，在那页等几秒让页面把登录会话写进来。');
+        }
+        if (probe.ok) {
+            return '✓ 链路正常：拿到了 HTTP ' + probe.status + '，' + probe.ms + 'ms，' + probe.bytes + ' 字节。'
+                + '如果你还是导不出，把上面的失败原文贴出来。';
+        }
+        return '请求链路是通的：拿到了数字状态码 HTTP ' + probe.status + '（' + probe.ms + 'ms）。'
+            + '这是服务端的答复，不是浏览器或脚本管理器的问题，稍后重试或换个时间。';
+    }
+
+    // 返回一个结构化报告，界面和测试都用它，避免两处各写一套判断。
+    async function collectEnvReport() {
+        const origin = currentOrigin();
+        const keys = describeSessionKeys();
+        const session = readStoredSession();
+        const probe = await probeEntitlements(session);
+        const onCapture = origin === CAPTURE_ORIGIN;
+
+        const lines = [];
+        lines.push('── 环境自检 ──');
+        lines.push('页面域：' + (origin || '读不到（非浏览器环境）')
+            + (onCapture ? '（就是抓取页）' : '（会话只在登录过的域里，换域读不到）'));
+        for (let i = 0; i < keys.length; i += 1) {
+            lines.push('会话 ' + keys[i].key + '：' + keys[i].text);
+        }
+        lines.push('读取结果：' + (session.ticket
+            ? '用了「' + session.key + '」的票' + (session.nameOnPlatform ? '（' + session.nameOnPlatform + '）' : '')
+                + (isSessionExpired(session) ? '，已过期' : '')
+            : '没有任何可用票据'));
+        lines.push('探测请求：GET ' + hostOf(ENT_URL) + '/entitlements → '
+            + (probe.reached ? 'HTTP ' + probe.status + '（' + probe.ms + 'ms）' : '抛错，' + probe.ms + 'ms'));
+        lines.push('结论：' + envConclusion(probe, session, origin));
+
+        return {
+            origin: origin,
+            onCaptureOrigin: onCapture,
+            keys: keys,
+            sessionKey: session.key,
+            hasTicket: !!session.ticket,
+            expired: isSessionExpired(session),
+            probe: probe,
+            lines: lines
+        };
+    }
+
     // ── 界面 ────────────────────────────────────────────────────────────────
     const ui = (function () {
-        let root, panel, statusEl, elapsedEl, barEl, logEl, btnRun, btnJson, btnLogin;
+        let root, panel, statusEl, elapsedEl, barEl, logEl, btnRun, btnJson, btnLogin, btnCapture, btnDiag;
 
         function inject() {
             root = document.createElement('div');
@@ -537,12 +687,18 @@
                 + '#ubi-export-json:disabled{opacity:.35;cursor:not-allowed}'
                 + '#ubi-export-login{width:100%;padding:9px;border:0;border-radius:7px;'
                 + 'background:#1f6feb;color:#fff;font-size:12px;font-weight:600;cursor:pointer;margin-bottom:8px;display:none}'
+                + '#ubi-export-capture{width:100%;padding:9px;border:0;border-radius:7px;'
+                + 'background:#1f6feb;color:#fff;font-size:12px;font-weight:600;cursor:pointer;margin-bottom:8px;display:none}'
+                + '#ubi-export-diag{width:100%;padding:7px;border:1px solid #2f3945;border-radius:7px;'
+                + 'background:transparent;color:#8b96a3;font-size:11px;font-weight:600;cursor:pointer;margin-top:4px}'
+                + '#ubi-export-diag:disabled{opacity:.4;cursor:not-allowed}'
                 + '</style>'
                 + '<button id="ubi-export-fab">育碧库存导出</button>'
                 + '<div id="ubi-export-panel">'
                 + '  <h3>育碧库存导出</h3>'
                 + '  <div class="sub">读取 Ubisoft Connect 的真实权益库存（owned game 口径），不上传任何数据。</div>'
                 + '  <button id="ubi-export-login">去登录育碧账号（新标签页）</button>'
+                + '  <button id="ubi-export-capture">前往抓取页面（本页跳转）</button>'
                 + '  <div id="ubi-export-statusrow">'
                 + '    <div id="ubi-export-status">就绪</div>'
                 + '    <div id="ubi-export-elapsed"></div>'
@@ -551,6 +707,7 @@
                 + '  <div id="ubi-export-log"></div>'
                 + '  <button id="ubi-export-run" class="act">开始导出</button>'
                 + '  <button id="ubi-export-json" disabled>下载 JSON</button>'
+                + '  <button id="ubi-export-diag">环境自检</button>'
                 + '</div>';
 
             document.body.appendChild(root);
@@ -563,6 +720,8 @@
             btnRun = root.querySelector('#ubi-export-run');
             btnJson = root.querySelector('#ubi-export-json');
             btnLogin = root.querySelector('#ubi-export-login');
+            btnCapture = root.querySelector('#ubi-export-capture');
+            btnDiag = root.querySelector('#ubi-export-diag');
 
             root.querySelector('#ubi-export-fab').addEventListener('click', function () {
                 panel.style.display = panel.style.display === 'block' ? 'none' : 'block';
@@ -577,6 +736,8 @@
                     stopTicker();
                     ui.log('✗ 失败：' + msg);
                     ui.progress(0, '失败');
+                    // 网络层失败（请求没发出去）光看这句话没法判断，直接把自检跑给人看。
+                    if (err && err.networkProblem) runEnvCheck().catch(function () { });
                 }).then(function () {
                     state.running = false;
                     btnRun.disabled = false;
@@ -587,6 +748,23 @@
             if (btnLogin) {
                 btnLogin.addEventListener('click', function () {
                     window.open(LOGIN_URL, '_blank', 'noopener');
+                });
+            }
+            if (btnCapture) {
+                btnCapture.addEventListener('click', function () {
+                    window.location.href = CAPTURE_URL;
+                });
+            }
+            if (btnDiag) {
+                btnDiag.addEventListener('click', function () {
+                    if (state.running) return;
+                    btnDiag.disabled = true;
+                    runEnvCheck().catch(function (err) {
+                        const msg = (err && err.message) ? err.message : String(err);
+                        ui.log('环境自检本身失败了：' + msg);
+                    }).then(function () {
+                        btnDiag.disabled = false;
+                    });
                 });
             }
             // 重挂时（页面把根节点清掉后）要把已有结果接上来，否则用户会觉得导出白跑了
@@ -612,16 +790,33 @@
                 logEl.textContent = line + '\n' + logEl.textContent;
                 logEl.scrollTop = 0;
             },
+            // 整块写入：log() 是逐行往**前**插的，多行逐条调用会让顺序整个反过来，
+            // 自检报告那种「标题在上、结论在下」的块必须一次写进去。
+            logBlock: function (lines) {
+                if (!logEl || !lines || !lines.length) return;
+                logEl.textContent = lines.join('\n') + '\n' + logEl.textContent;
+                logEl.scrollTop = 0;
+            },
             setDownloads: function (on) {
                 if (btnJson) btnJson.disabled = !on;
             },
             setLoginHint: function (on) {
                 if (btnLogin) btnLogin.style.display = on ? 'block' : 'none';
+            },
+            setCaptureHint: function (on) {
+                if (btnCapture) btnCapture.style.display = on ? 'block' : 'none';
             }
         };
     })();
 
     function enableDownloads(on) { ui.setDownloads(on); }
+
+    // 把自检结果整块写进面板。手机上没法开控制台，所以结论必须落在界面上。
+    async function runEnvCheck() {
+        const report = await collectEnvReport();
+        ui.logBlock(report.lines);
+        return report;
+    }
 
     // 计时器：每 100ms 刷新已用秒数，让用户看到界面在动（网络慢时秒数仍在走）。
     function startTicker() {
@@ -653,12 +848,20 @@
         ui.mount();
         ui.progress(0, '就绪');
         const s = readStoredSession();
+        const onCapture = currentOrigin() === CAPTURE_ORIGIN;
         if (s.ticket) {
             ui.setLoginHint(false);
+            ui.setCaptureHint(false);
             ui.log('已检测到登录会话（' + (s.nameOnPlatform || s.userId || '已登录') + '）。点「开始导出」。');
         } else {
             ui.setLoginHint(true);
-            ui.log('还没登录。点上面的按钮在新标签页登录（本页留着），登录完关掉那个标签页回来点「开始导出」。');
+            // 不是抓取页就先把人送过去 —— 会话是按域存的，在这个域里等一辈子也等不到。
+            ui.setCaptureHint(!onCapture);
+            if (onCapture) {
+                ui.log('这一页就是抓取页，但还没读到会话。先点「去登录育碧账号」登录，回到本页刷新后再导出。');
+            } else {
+                ui.log('这一页读不到登录会话：会话只存在登录过的那个域里。点「前往抓取页面」过去再导出。');
+            }
         }
     }
 
@@ -692,6 +895,13 @@
             toMillis: toMillis,
             runExport: runExport,
             SESSION_KEYS: SESSION_KEYS,
+            CAPTURE_ORIGIN: CAPTURE_ORIGIN,
+            CAPTURE_URL: CAPTURE_URL,
+            currentOrigin: currentOrigin,
+            describeSessionKeys: describeSessionKeys,
+            probeEntitlements: probeEntitlements,
+            envConclusion: envConclusion,
+            collectEnvReport: collectEnvReport,
             LOGIN_URL: LOGIN_URL,
             LOGIN_PATH: LOGIN_PATH,
             LOGIN_ORIGIN: LOGIN_ORIGIN,

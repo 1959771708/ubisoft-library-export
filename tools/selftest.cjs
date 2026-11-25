@@ -46,6 +46,70 @@ function assertEqual(actual, expected, label) {
     if (a !== e) throw new Error(label + '：期望 ' + e + '，实际 ' + a);
 }
 
+// ── DOM 桩 ──────────────────────────────────────────────────────────────────
+// 导出主流程不碰 DOM，但界面那一路（面板、按钮、日志）是最容易改坏又最难自查的部分：
+// 手滑把 addEventListener 写掉、把 logBlock 写成逐行 log，导出照跑、面板却悄悄坏了。
+// 所以给 mountUi 场景提供一个够真的桩，让 boot() 真的挂上去、按钮真的点得到。
+function makeDom() {
+    const byId = new Map();
+
+    function makeEl(tag) {
+        const el = {
+            tagName: tag,
+            style: {},
+            textContent: '',
+            innerHTML: '',
+            disabled: false,
+            children: [],
+            _listeners: {},
+            addEventListener: function (type, fn) {
+                (this._listeners[type] = this._listeners[type] || []).push(fn);
+            },
+            appendChild: function (c) { this.children.push(c); return c; },
+            remove: function () {},
+            click: function () {
+                const fns = this._listeners.click || [];
+                fns.forEach(function (f) { f.call(el, { target: el }); });
+            }
+        };
+        // 脚本是先 createElement 再 el.id = 'xxx'，靠 setter 自动登记，
+        // 这样 document.getElementById 才能找到真实建出来的节点。
+        let _id = '';
+        Object.defineProperty(el, 'id', {
+            get: function () { return _id; },
+            set: function (v) { _id = v; if (v) byId.set(v, el); },
+            configurable: true,
+            enumerable: true
+        });
+        // innerHTML 不解析；脚本随后用 querySelector('#id') 逐个取，按 id 造占位节点。
+        el.querySelector = function (sel) {
+            if (sel.charAt(0) !== '#') return null;
+            const id = sel.slice(1);
+            if (!byId.has(id)) {
+                const dummy = makeEl('div');
+                dummy.id = id;
+            }
+            return byId.get(id);
+        };
+        el.querySelectorAll = function () { return []; };
+        return el;
+    }
+
+    const body = makeEl('body');
+    return {
+        body: body,
+        byId: byId,
+        document: {
+            readyState: 'complete',
+            body: body,
+            getElementById: function (id) { return byId.has(id) ? byId.get(id) : null; },
+            addEventListener: function () {},
+            querySelector: function () { return null; },
+            createElement: function (tag) { return makeEl(tag); }
+        }
+    };
+}
+
 // ── 沙箱 ────────────────────────────────────────────────────────────────────
 // route 三种写法：
 //   { status, body }                   每次返回同一结果
@@ -92,6 +156,8 @@ function makeSandbox(options) {
         };
     }
 
+    const dom = opts.mountUi ? makeDom() : null;
+
     const sandbox = {
         console,
         setTimeout,
@@ -120,14 +186,20 @@ function makeSandbox(options) {
             removeItem: function (k) { delete store[k]; }
         },
         fetch: fakeFetch,
+        // 会话按 origin 隔离，自检的第一件事就是比对当前域，所以沙箱必须能指定 location。
+        location: {
+            origin: opts.origin || 'https://zh-cn.ubisoft.com',
+            protocol: 'https:',
+            host: (opts.origin || 'https://zh-cn.ubisoft.com').replace(/^https?:\/\//, '')
+        },
         Blob: function Blob(parts) { this.parts = parts; },
         URL: {
             createObjectURL: function () { return 'blob:fake'; },
             revokeObjectURL: function () {}
         },
-        document: {
-            // 导出主流程不碰 DOM；这里只满足模块顶层的存在性判断。
-            // getElementById 返回真值让 boot() 直接早退，避免在沙箱里真的去挂界面。
+        document: opts.mountUi ? dom.document : {
+            // 默认不挂界面：getElementById 返回真值让 boot() 直接早退，
+            // 导出主流程根本用不到 DOM。要测界面就传 mountUi:true。
             readyState: 'complete',
             getElementById: function () { return {}; },
             addEventListener: function () {},
@@ -142,7 +214,7 @@ function makeSandbox(options) {
     vm.createContext(sandbox);
     vm.runInContext(fs.readFileSync(SCRIPT, 'utf8'), sandbox, { filename: 'ubisoft-library-export.user.js' });
 
-    return { sandbox, api: sandbox.__ubisoftExport, calls, store };
+    return { sandbox, api: sandbox.__ubisoftExport, calls, store, dom: opts.mountUi ? dom : null };
 }
 
 // ── 语料 ────────────────────────────────────────────────────────────────────
@@ -575,6 +647,205 @@ async function testRunExport() {
     });
 }
 
+// ── 环境自检 ────────────────────────────────────────────────────────────────
+// 自检的价值全在「把三种失败分开」：请求没发出去 / 票据被拒 / 服务端 5xx。
+// 下面逐个钉住，避免以后改文案时把三种混成一句「失败了」。
+async function testEnvCheck() {
+    check('每个 SESSION_KEY 都单独报告有没有票据', function () {
+        const env = makeSandbox({ store: { PRODloginData: SESSION } });
+        const rows = env.api.describeSessionKeys();
+        assertEqual(rows.length, 3, '三个键各一行');
+        assertEqual(rows.map(function (r) { return r.key; }), env.api.SESSION_KEYS.slice(), '顺序与 SESSION_KEYS 一致');
+
+        const byKey = {};
+        rows.forEach(function (r) { byKey[r.key] = r; });
+        assertEqual(byKey.PRODloginData.state, 'ok', '有票的键标 ok');
+        assertEqual(byKey.loginData.state, 'missing', '没有的键标 missing');
+        assertEqual(byKey.PRODOverlayConnectLoginData.state, 'missing', '没读到的键不能算 ok');
+    });
+
+    check('坏 JSON 与缺字段要和「没有」区分开', function () {
+        const broken = makeSandbox({ store: { PRODloginData: '{not json' } });
+        const row = broken.api.describeSessionKeys()[0];
+        assertEqual(row.state, 'broken', '坏 JSON 单独一档');
+        assert(row.text.indexOf('不是 JSON') !== -1, '文案要说清是格式问题');
+
+        const incomplete = makeSandbox({ store: { PRODloginData: JSON.stringify({ ticket: 'T' }) } });
+        const row2 = incomplete.api.describeSessionKeys()[0];
+        assertEqual(row2.state, 'incomplete', '缺 sessionId 单独一档');
+    });
+
+    await checkAsync('请求没发出去时，结论必须指向本地拦截而不是账号', async function () {
+        const routes = [{ url: '/entitlements', method: 'GET', networkError: 'Failed to fetch' }];
+        const env = makeSandbox({ store: { PRODloginData: SESSION }, routes });
+        const report = await env.api.collectEnvReport();
+
+        assertEqual(report.probe.reached, false, '标成没到达');
+        assert(report.probe.message.indexOf('Failed to fetch') !== -1, '保留原始错误原文');
+        const line = report.lines[report.lines.length - 1];
+        assert(line.indexOf('根本没发出去') !== -1, '结论要说请求没发出去');
+        assert(line.indexOf('不是账号问题') !== -1, '要排掉账号方向');
+        assert(line.indexOf('拦截') !== -1, '要指出本地拦截');
+    });
+
+    await checkAsync('401 时结论指向票据，而不是网络', async function () {
+        const routes = [{ url: '/entitlements', method: 'GET', status: 401, body: { message: 'Unauthorized' } }];
+        const env = makeSandbox({ store: { PRODloginData: SESSION }, routes });
+        const report = await env.api.collectEnvReport();
+
+        assertEqual(report.probe.reached, true, '请求到达了');
+        assertEqual(report.probe.status, 401, '状态码原样带出');
+        const line = report.lines[report.lines.length - 1];
+        assert(line.indexOf('票据') !== -1, '结论要说票据');
+        assert(line.indexOf('401') !== -1, '带上状态码');
+        assert(line.indexOf('PRODloginData') !== -1, '指出票是从哪个 key 读的');
+    });
+
+    await checkAsync('2xx 时结论是链路正常', async function () {
+        const routes = [{ url: '/entitlements', method: 'GET', status: 200, body: { entitlements: ENTITLEMENTS } }];
+        const env = makeSandbox({ store: { PRODloginData: SESSION }, routes });
+        const report = await env.api.collectEnvReport();
+        const line = report.lines[report.lines.length - 1];
+        assert(line.indexOf('链路正常') !== -1, '2xx 要报正常');
+        assert(report.probe.bytes > 0, '带上响应字节数');
+    });
+
+    await checkAsync('5xx 时不能说成浏览器问题', async function () {
+        const routes = [{ url: '/entitlements', method: 'GET', status: 503, body: { message: 'down' } }];
+        const env = makeSandbox({ store: { PRODloginData: SESSION }, routes });
+        const report = await env.api.collectEnvReport();
+        const line = report.lines[report.lines.length - 1];
+        assert(line.indexOf('503') !== -1, '带上状态码');
+        assert(line.indexOf('服务端') !== -1, '要指向服务端');
+        assert(line.indexOf('不是浏览器') !== -1, '要明确排除浏览器');
+    });
+
+    await checkAsync('自检会明确指出当前域名和抓取页是否一致', async function () {
+        const onCapture = makeSandbox({ store: {}, origin: 'https://zh-cn.ubisoft.com', routes: [{ url: '/entitlements', status: 200, body: [] }] });
+        const a = await onCapture.api.collectEnvReport();
+        assertEqual(a.onCaptureOrigin, true, '抓取页上要标 true');
+        assert(a.lines[1].indexOf('就是抓取页') !== -1, '文案点明就是抓取页');
+
+        const elsewhere = makeSandbox({ store: {}, origin: 'https://www.ubisoft.com', routes: [{ url: '/entitlements', status: 200, body: [] }] });
+        const b = await elsewhere.api.collectEnvReport();
+        assertEqual(b.onCaptureOrigin, false, '别的域要标 false');
+        assert(b.lines[1].indexOf('换域读不到') !== -1, '文案解释跨域读不到');
+    });
+
+    await checkAsync('没票时自检仍然照发探测请求，不提前放弃', async function () {
+        // 没票也要探：能区分「服务端回 401」和「本地就拦了」，这是用户最需要的那条信息。
+        const env = makeSandbox({ store: {}, routes: [{ url: '/entitlements', method: 'GET', status: 401, body: {} }] });
+        const report = await env.api.collectEnvReport();
+        assertEqual(env.calls.length, 1, '仍然发了一次探测');
+        assertEqual(report.hasTicket, false, '报告里标明没票');
+        const headers = env.calls[0].headers;
+        assertEqual(headers.Authorization, undefined, '没票时不能伪造 Authorization 头');
+        assertEqual(headers['Ubi-AppId'], 'f68a4bb5-608a-4ff2-8123-be8ef797e0a6', '仍带上 appId');
+    });
+
+    check('抓取页常量与 @match 覆盖的域一致', function () {
+        const src = fs.readFileSync(SCRIPT, 'utf8');
+        assert(src.indexOf('https://zh-cn.ubisoft.com') !== -1, '常量宿主要在 @match 的 *.ubisoft.com 覆盖范围内');
+        const env = makeSandbox({ store: {} });
+        assertEqual(env.api.CAPTURE_URL, env.api.CAPTURE_ORIGIN + '/', 'CAPTURE_URL 由 origin 拼出');
+    });
+
+    await checkAsync('导出遇到网络层失败时，错误带 networkProblem 标记供界面触发自检', async function () {
+        const routes = [{ url: '/entitlements', method: 'GET', networkError: 'Failed to fetch' }];
+        const env = makeSandbox({ store: { PRODloginData: SESSION }, routes });
+        let err = null;
+        try {
+            await env.api.runExport();
+        } catch (e) {
+            err = e;
+        }
+        assert(err, '必须抛错');
+        assertEqual(err.networkProblem, true, '网络层失败要打标记');
+        assert(err.message.indexOf('Failed to fetch') !== -1, '保留原始错误原文');
+    });
+}
+
+// ── 界面 ────────────────────────────────────────────────────────────────────
+// 默认沙箱让 boot() 早退，面板那一路从没被执行过。这里用真 DOM 桩挂上去，
+// 把「提示按钮该不该露」「自检报告顺序」「失败自动自检」这些肉眼才看得出的问题钉住。
+async function testUi() {
+    // 抓取页 + 有会话 → 挂上、两个提示按钮都不露
+    await checkAsync('界面 抓取页且已登录：挂载并收起两个提示按钮', function () {
+        const env = makeSandbox({
+            mountUi: true,
+            store: { PRODloginData: SESSION },
+            origin: 'https://zh-cn.ubisoft.com',
+            routes: [{ url: '/entitlements', status: 200, body: { entitlements: [] } }]
+        });
+        assert(env.dom.byId.get('ubi-export-root'), 'boot() 必须挂上根节点');
+        assert(env.dom.body.children.length > 0, '根节点必须 append 到 body');
+
+        const logEl = env.dom.byId.get('ubi-export-log');
+        assert(logEl && logEl.textContent.indexOf('已检测到登录会话') !== -1, '有会话时要提示已检出');
+        assertEqual(env.dom.byId.get('ubi-export-login').style.display, 'none', '有会话时不显示登录按钮');
+        assertEqual(env.dom.byId.get('ubi-export-capture').style.display, 'none', '已在抓取页时不显示前往抓取按钮');
+    });
+
+    // 别的域 + 没会话 → 两个按钮都要露，且文案点明跨域读不到
+    await checkAsync('界面 别的域且未登录：给出登录与前往抓取两个入口', function () {
+        const env = makeSandbox({ mountUi: true, store: {}, origin: 'https://www.ubisoft.com', routes: [] });
+        assertEqual(env.dom.byId.get('ubi-export-login').style.display, 'block', '没会话时必须给出登录入口');
+        assertEqual(env.dom.byId.get('ubi-export-capture').style.display, 'block', '不在抓取页时必须给出去抓取页的入口');
+        const logEl = env.dom.byId.get('ubi-export-log');
+        assert(logEl.textContent.indexOf('会话只存在登录过的那个域') !== -1, '文案要解释会话按域隔离');
+    });
+
+    // 抓取页 + 没会话 → 已经在抓取页了，不该再劝跳转，只劝登录
+    await checkAsync('界面 抓取页但未登录：不再劝跳转，改为劝登录', function () {
+        const env = makeSandbox({ mountUi: true, store: {}, origin: 'https://zh-cn.ubisoft.com', routes: [] });
+        assert(env.dom.byId.get('ubi-export-capture').style.display !== 'block', '已在抓取页时不该再劝跳转');
+        const logEl = env.dom.byId.get('ubi-export-log');
+        assert(logEl.textContent.indexOf('这一页就是抓取页') !== -1, '文案要点明当前就是抓取页');
+    });
+
+    // 点「环境自检」→ 报告整块写进日志，标题在结论之前（防止退回逐行前插）
+    await checkAsync('界面 点自检：报告成块写入且顺序正确', async function () {
+        const env = makeSandbox({
+            mountUi: true,
+            store: { PRODloginData: SESSION },
+            origin: 'https://zh-cn.ubisoft.com',
+            routes: [{ url: '/entitlements', method: 'GET', status: 401, body: { message: 'no' } }]
+        });
+        const btnDiag = env.dom.byId.get('ubi-export-diag');
+        assert(btnDiag, '自检按钮必须存在');
+        btnDiag.click();
+        await new Promise(function (r) { setTimeout(r, 30); });
+
+        const txt = env.dom.byId.get('ubi-export-log').textContent;
+        assert(txt.indexOf('── 环境自检 ──') !== -1, '日志里要有自检标题');
+        assert(txt.indexOf('401') !== -1, '日志里要有状态码');
+        assert(txt.indexOf('票据') !== -1, '401 时结论要指向票据');
+        const headIdx = txt.indexOf('── 环境自检 ──');
+        const tailIdx = txt.indexOf('结论：');
+        assert(headIdx !== -1 && tailIdx !== -1 && headIdx < tailIdx, '标题必须在结论之前，顺序不能被前插打乱');
+        assertEqual(btnDiag.disabled, false, '自检完成后按钮要恢复可用');
+    });
+
+    // 导出遇网络层失败 → 自动跑自检，并把结论写进面板
+    await checkAsync('界面 导出遇网络层失败：自动跑自检并给出结论', async function () {
+        const env = makeSandbox({
+            mountUi: true,
+            store: { PRODloginData: SESSION },
+            origin: 'https://zh-cn.ubisoft.com',
+            routes: [{ url: '/entitlements', method: 'GET', networkError: 'Failed to fetch' }]
+        });
+        const btnRun = env.dom.byId.get('ubi-export-run');
+        btnRun.click();
+        await new Promise(function (r) { setTimeout(r, 60); });
+
+        const txt = env.dom.byId.get('ubi-export-log').textContent;
+        assert(txt.indexOf('✗ 失败') !== -1, '要记录失败');
+        assert(txt.indexOf('── 环境自检 ──') !== -1, '网络层失败后要自动跑自检');
+        assert(txt.indexOf('根本没发出去') !== -1, '自检结论要指出请求没发出去');
+        assertEqual(btnRun.disabled, false, '跑完后开始导出按钮要恢复');
+    });
+}
+
 // ── 主入口 ──────────────────────────────────────────────────────────────────
 (async function main() {
     if (!fs.existsSync(SCRIPT)) {
@@ -583,6 +854,8 @@ async function testRunExport() {
     }
     testPureFunctions();
     await testRunExport();
+    await testEnvCheck();
+    await testUi();
 
     const total = pass + failures.length;
     // 机器可读汇总行：gen_facts / check_docs 靠这两个数字判定，不要改格式。
