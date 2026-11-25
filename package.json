@@ -1,6 +1,6 @@
 {
   "name": "ubisoft-library-export",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "导出 Ubisoft Connect 账号的完整游戏库存（权益口径），输出 JSON 供第三方工具导入",
   "scripts": {

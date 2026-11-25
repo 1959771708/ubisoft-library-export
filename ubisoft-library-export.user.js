@@ -2,7 +2,7 @@
 // @name         育碧库存导出
 // @name:en      Ubisoft Library Export
 // @namespace    https://github.com/1959771708/ubisoft-library-export
-// @version      1.0.0
+// @version      1.0.1
 // @description  导出 Ubisoft Connect 账号的完整游戏库存（权益口径），输出 JSON 供第三方工具导入
 // @description:en  Export your complete Ubisoft Connect library, based on owned game entitlements.
 // @author       1959771708
@@ -25,6 +25,14 @@
     // 不是私人密钥）。注意：登录页用的 appId 是另一个（1068ef52-…），而 API 侧会拒绝登录 appId，
     // 所以本脚本读网页 localStorage 里的 ticket 后，必要时先换一次票再读库。
     const APP_ID = 'f68a4bb5-608a-4ff2-8123-be8ef797e0a6';
+
+    // 登录页必须带 appId，否则 SPA 会把自己导航到 /error（实测 /v2/webauth/public/config
+    // 不带 appId 返回 invalid:true，带 genomeId 也返回 invalid:true）。
+    // 根路径 https://connect.ubisoft.com/ 会 301 到官网营销页，也不是登录页。
+    // 不加 nexturl：登录成功后 SPA 会跳去它的默认值 https://ubisoft.com（本页随之离开）。
+    // 所以脚本用「新标签页打开登录页」的方式，让用户把这个页面留着点导出。
+    const LOGIN_APP_ID = '1068ef52-dfd2-4e62-8ac9-37a47e6c0b78';
+    const LOGIN_URL = 'https://connect.ubisoft.com/login?appId=' + LOGIN_APP_ID;
 
     const ENT_URL = 'https://api-ubiservices.ubi.com/v1/profiles/me/global/ubiconnect/entitlement/api/entitlements';
     const SESSION_URL = 'https://public-ubiservices.ubi.com/v2/profiles/sessions';
@@ -297,7 +305,7 @@
 
         const s = session || readStoredSession();
         if (!s.ticket || !s.sessionId) {
-            throw new Error('没有找到登录会话。请先在 connect.ubisoft.com 登录，再回到本页点导出。'
+            throw new Error('没有找到登录会话。请先在本页登录（' + LOGIN_URL + '），登录后再点导出。'
                 + '（读取的 localStorage 键：' + SESSION_KEYS.join(' / ') + '）');
         }
 
@@ -408,7 +416,7 @@
 
     // ── 界面 ────────────────────────────────────────────────────────────────
     const ui = (function () {
-        let root, panel, statusEl, elapsedEl, barEl, logEl, btnRun, btnJson;
+        let root, panel, statusEl, elapsedEl, barEl, logEl, btnRun, btnJson, btnLogin;
 
         function inject() {
             root = document.createElement('div');
@@ -443,11 +451,14 @@
                 + '#ubi-export-json{width:100%;padding:9px;border:1px solid #2f3945;border-radius:7px;'
                 + 'background:#1a212a;color:#cfd6df;font-size:12px;font-weight:600;cursor:pointer}'
                 + '#ubi-export-json:disabled{opacity:.35;cursor:not-allowed}'
+                + '#ubi-export-login{width:100%;padding:9px;border:0;border-radius:7px;'
+                + 'background:#1f6feb;color:#fff;font-size:12px;font-weight:600;cursor:pointer;margin-bottom:8px;display:none}'
                 + '</style>'
                 + '<button id="ubi-export-fab">育碧库存导出</button>'
                 + '<div id="ubi-export-panel">'
                 + '  <h3>育碧库存导出</h3>'
                 + '  <div class="sub">读取 Ubisoft Connect 的真实权益库存（owned game 口径），不上传任何数据。</div>'
+                + '  <button id="ubi-export-login">去登录育碧账号（新标签页）</button>'
                 + '  <div id="ubi-export-statusrow">'
                 + '    <div id="ubi-export-status">就绪</div>'
                 + '    <div id="ubi-export-elapsed"></div>'
@@ -467,6 +478,7 @@
             logEl = root.querySelector('#ubi-export-log');
             btnRun = root.querySelector('#ubi-export-run');
             btnJson = root.querySelector('#ubi-export-json');
+            btnLogin = root.querySelector('#ubi-export-login');
 
             root.querySelector('#ubi-export-fab').addEventListener('click', function () {
                 panel.style.display = panel.style.display === 'block' ? 'none' : 'block';
@@ -488,6 +500,11 @@
                 });
             });
             btnJson.addEventListener('click', exportJson);
+            if (btnLogin) {
+                btnLogin.addEventListener('click', function () {
+                    window.open(LOGIN_URL, '_blank', 'noopener');
+                });
+            }
         }
 
         return {
@@ -507,6 +524,9 @@
             },
             setDownloads: function (on) {
                 if (btnJson) btnJson.disabled = !on;
+            },
+            setLoginHint: function (on) {
+                if (btnLogin) btnLogin.style.display = on ? 'block' : 'none';
             }
         };
     })();
@@ -537,9 +557,11 @@
         ui.progress(0, '就绪');
         const s = readStoredSession();
         if (s.ticket) {
+            ui.setLoginHint(false);
             ui.log('已检测到登录会话（' + (s.nameOnPlatform || s.userId || '已登录') + '）。点「开始导出」。');
         } else {
-            ui.log('还没登录。请先在 connect.ubisoft.com 登录，登录后再点「开始导出」。');
+            ui.setLoginHint(true);
+            ui.log('还没登录。点上面的按钮在新标签页登录（本页留着），登录完关掉那个标签页回来点「开始导出」。');
         }
     }
 
@@ -552,6 +574,8 @@
             collapseBySpaceId: collapseBySpaceId,
             collectPlatforms: collectPlatforms,
             runExport: runExport,
+            LOGIN_URL: LOGIN_URL,
+            LOGIN_APP_ID: LOGIN_APP_ID,
             state: state
         };
     }

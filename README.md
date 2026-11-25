@@ -2,7 +2,7 @@
 
 从 **Ubisoft Connect 网页端**导出一份完整的游戏库存清单（JSON），供第三方工具导入或做数据分析。
 
-油猴（Tampermonkey）脚本，装一次就行：打开 <https://connect.ubisoft.com> 登录后点右下角按钮，几秒后下载 JSON。
+油猴（Tampermonkey）脚本，装一次就行：打开 `https://connect.ubisoft.com/login?appId=1068ef52-dfd2-4e62-8ac9-37a47e6c0b78` 登录后点右下角按钮，几秒后下载 JSON。
 
 ## 一键安装
 
@@ -40,11 +40,20 @@
 
 1. 装 [Tampermonkey](https://www.tampermonkey.net/)（或 Violentmonkey）。
 2. 点上面的[一键安装](#一键安装)链接；手动安装的话，新建脚本把 [ubisoft-library-export.user.js](ubisoft-library-export.user.js) 整个粘进去保存。
-3. 打开 <https://connect.ubisoft.com>，**登录你的育碧账号**。
-4. 页面右下角出现蓝色按钮「导出库存」，点它。
-5. 等进度条走完，浏览器自动下载 `ubisoft-library-*.json`。
+3. 打开 <https://connect.ubisoft.com/login?appId=1068ef52-dfd2-4e62-8ac9-37a47e6c0b78>，**登录你的育碧账号**。
+4. 登录成功后页面会跳去 ubisoft.com；**回到第 3 步那个地址**（会话已存好，不用再登录）。
+5. 页面右下角出现蓝色按钮「育碧库存导出」，点它。
+6. 等进度条走完，浏览器自动下载 `ubisoft-library-*.json`。
+
+没登录时面板上会有一个「去登录育碧账号（新标签页）」按钮，它在新标签页打开同一个地址，当前页不会被跳走，登录完关掉那个标签页回来点「开始导出」即可。
 
 脚本只在 `connect.ubisoft.com` 上运行，直接复用你**已经登录的网页会话**，不需要你输入密码，也不碰你的账号密码。
+
+### 为什么不能直接打开 `https://connect.ubisoft.com`
+
+那个根路径会 301 到育碧官网营销页，不是登录页。登录页必须带 `appId`，否则前端会把自己导航到 `/error` —— **打开 `/error` 看到错误页是正常的**，它只是这条路走错了，不代表脚本或账号有问题。`connect.ubisoft.com` 这个 SPA 只有 `/login` 这类路由，也不认 `/zh-CN/login` 这种语言前缀（会 404）。
+
+同理**不要给登录地址加 `genomeId`**：实测 `?appId=…&genomeId=…` 会被服务端判为 `invalid:true`，一样跳 `/error`。
 
 ---
 

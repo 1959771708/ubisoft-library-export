@@ -263,6 +263,16 @@ function testPureFunctions() {
         const ok = makeSandbox({ store: { PRODloginData: SESSION } });
         assertEqual(ok.api.readStoredSession().nameOnPlatform, 'TestPlayer', '正常读取');
     });
+
+    // 回归：connect.ubisoft.com 根路径会 301 到官网营销页；登录页必须带 appId，
+    // 且绝不能带 genomeId（实测两者都会让 SPA 自己 navigate('/error')）。
+    check('登录 URL 带 appId、不带 genomeId、不是裸根路径', function () {
+        const url = new URL(api.LOGIN_URL);
+        assertEqual(url.pathname, '/login', '路径必须是 /login');
+        assertEqual(url.searchParams.get('appId'), api.LOGIN_APP_ID, '带 appId');
+        assertEqual(url.searchParams.get('genomeId'), null, '不能带 genomeId');
+        assertEqual(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(api.LOGIN_APP_ID), true, 'appId 是合法 GUID');
+    });
 }
 
 // ── 主流程 ──────────────────────────────────────────────────────────────────
