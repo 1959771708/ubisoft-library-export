@@ -2,7 +2,7 @@
 // @name         育碧库存导出
 // @name:en      Ubisoft Library Export
 // @namespace    https://github.com/1959771708/ubisoft-library-export
-// @version      1.0.4
+// @version      1.0.5
 // @description  导出 Ubisoft Connect 账号的完整游戏库存（权益口径），输出 JSON 供第三方工具导入
 // @description:en  Export your complete Ubisoft Connect library, based on owned game entitlements.
 // @author       1959771708
@@ -589,6 +589,12 @@
                     window.open(LOGIN_URL, '_blank', 'noopener');
                 });
             }
+            // 重挂时（页面把根节点清掉后）要把已有结果接上来，否则用户会觉得导出白跑了
+            if (state.result) {
+                btnJson.disabled = false;
+                statusEl.textContent = '已完成（' + state.result.summary.gameCount + ' 款）';
+                barEl.style.width = '100%';
+            }
         }
 
         return {
@@ -635,8 +641,15 @@
     }
 
     // ── 启动 ────────────────────────────────────────────────────────────────
+    // 区域站（www.ubisoft.com）是 Next.js 单页应用：脚本在 document-idle 注入时
+    // React 可能还没完成 hydration，挂上去的按钮会在 hydration 时被整棵替换掉。
+    // 所以只挂一次不够，必须盯着 DOM，发现根节点没了就重新挂（幂等，重复调用无副作用）。
+    const REMOUNT_INTERVAL = 1500;
+    let remountTimer = null;
+
     function boot() {
         if (document.getElementById('ubi-export-root')) return;
+        if (!document.body) return;
         ui.mount();
         ui.progress(0, '就绪');
         const s = readStoredSession();
@@ -647,6 +660,23 @@
             ui.setLoginHint(true);
             ui.log('还没登录。点上面的按钮在新标签页登录（本页留着），登录完关掉那个标签页回来点「开始导出」。');
         }
+    }
+
+    function bootSafely() {
+        try {
+            boot();
+        } catch (err) {
+            // 挂界面失败不该让脚本整个死掉，留个线索在控制台
+            console.error('[育碧库存导出] 界面挂载失败：', err);
+        }
+    }
+
+    function watchForRemoval() {
+        if (remountTimer) return;
+        remountTimer = setInterval(function () {
+            // 只在已经挂过之后才补挂，避免在页面还没就绪时反复尝试
+            if (!document.getElementById('ubi-export-root')) bootSafely();
+        }, REMOUNT_INTERVAL);
     }
 
     // 供 Node 侧测试直接驱动主流程（不依赖 DOM）。
@@ -674,8 +704,9 @@
     if (typeof document === 'undefined') return;
 
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', boot, { once: true });
+        document.addEventListener('DOMContentLoaded', function () { bootSafely(); watchForRemoval(); }, { once: true });
     } else {
-        boot();
+        bootSafely();
+        watchForRemoval();
     }
 })();

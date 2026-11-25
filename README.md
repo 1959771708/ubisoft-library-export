@@ -40,26 +40,32 @@
 
 1. 装 [Tampermonkey](https://www.tampermonkey.net/)（或 Violentmonkey）。
 2. 点上面的[一键安装](#一键安装)链接；手动安装的话，新建脚本把 [ubisoft-library-export.user.js](ubisoft-library-export.user.js) 整个粘进去保存。
-3. 打开 <https://connect.ubisoft.com/login?appId=1068ef52-dfd2-4e62-8ac9-37a47e6c0b78>，**登录你的育碧账号**。
-4. 登录成功后页面会跳去 ubisoft.com；**回到第 3 步那个地址**（会话已存好，不用再登录）。
+3. 登录育碧账号：打开 <https://connect.ubisoft.com/login?appId=1068ef52-dfd2-4e62-8ac9-37a47e6c0b78> 登录。
+4. 登录成功后页面会跳去 `ubisoft.com`（哪个区域取决于你的 IP）。**就在那个页面上操作**，脚本在区域站同样会跑起来。
 5. 页面右下角出现蓝色按钮「育碧库存导出」，点它。
 6. 等进度条走完，浏览器自动下载 `ubisoft-library-*.json`。
 
-没登录时面板上会有一个「去登录育碧账号（新标签页）」按钮，它在新标签页打开同一个地址，当前页不会被跳走，登录完关掉那个标签页回来点「开始导出」即可。
+也可以在任意 `ubisoft.com` 页面直接打开面板 —— 只要那个页面已经登录，脚本就能从站点自己的 localStorage 里读到会话。没登录时面板上有一个「去登录育碧账号（新标签页）」按钮，它在新标签页打开登录页，当前页不会被跳走，登录完关掉那个标签页回来点「开始导出」即可。
 
-脚本只在 `connect.ubisoft.com` 上运行，直接复用你**已经登录的网页会话**，不需要你输入密码，也不碰你的账号密码。
+脚本直接复用你**已经登录的网页会话**，不需要你输入密码，也不碰你的账号密码。
 
 ### 挂了代理 / 在海外也能用
 
-登录页默认的返回地址是 `https://ubisoft.com`，那个域名会按访问者 IP 落到区域站（例如用美国代理就跳 `www.ubisoft.com/en-us/…`），而脚本只在本域运行，于是在区域站看不到按钮。
+登录页默认的返回地址是 `https://ubisoft.com`，那个域名会按访问者 IP 落到区域站（例如用美国代理就跳 `www.ubisoft.com/en-us`）。**这不影响使用**：脚本同时覆盖 `ubisoft.com` 及其子域，落到哪个区域站都能导出。
 
-脚本面板上的「去登录育碧账号」按钮已经把这个返回地址钉回本域的 `/login`，所以**用代理登录也不会被甩到区域站**。手动输入地址时请照抄按钮打开的那个链接（里面带 `nexturl=` 参数）。
+区域站页面里嵌着育碧自己的 WebAuth SDK，会把登录票据写进站点自己的 localStorage（键名 `PRODOverlayConnectLoginData`）。那张票属于站点自己的 appId，直接拿去调库存接口会被拒（401），脚本会自动换一次票（`POST /v2/profiles/sessions`）再读库——这条路径已在真实浏览器里跑通。
+
+> 早期版本试过用 `nexturl` 参数把登录后的落地页钉回 `connect.ubisoft.com`，实测**只保得住一次跳转**：我们设的 nexturl 自身不再带 nexturl，落地后再登录一次就回落默认值，照样被甩到区域站。所以现在不跟它抢落点，改成直接覆盖区域站。
 
 ### 为什么不能直接打开 `https://connect.ubisoft.com`
 
 那个根路径会 301 到育碧官网营销页，不是登录页。登录页必须带 `appId`，否则前端会把自己导航到 `/error` —— **打开 `/error` 看到错误页是正常的**，它只是这条路走错了，不代表脚本或账号有问题。`connect.ubisoft.com` 这个 SPA 只有 `/login` 这类路由，也不认 `/zh-CN/login` 这种语言前缀（会 404）。
 
 同理**不要给登录地址加 `genomeId`**：实测 `?appId=…&genomeId=…` 会被服务端判为 `invalid:true`，一样跳 `/error`。
+
+### 界面被页面清掉时会自动重挂
+
+`ubisoft.com` 是 Next.js 单页应用，脚本注入时机可能早于页面 hydration，挂上去的按钮会被整棵替换掉。脚本每 1.5 秒检查一次根节点，发现没了就重新挂；已有导出结果也会接回来（下载按钮保持可用）。
 
 ### 导出的 JSON 是英文
 
