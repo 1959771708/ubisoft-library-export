@@ -412,6 +412,21 @@ async function testRunExport() {
         assertEqual(result.summary.titleError, 'HTTP_500', '英文错误码');
     });
 
+    // 英文标题不是巧合：育碧按 Ubi-LocaleCode 返回译名（实测 zh-CN 下 WATCH_DOGS™ 会变成「看门狗」）。
+    // 所以每一个出站请求都必须带 en-US，少一个就可能出现中文。
+    await checkAsync('每个出站请求都带 Ubi-LocaleCode: en-US', async function () {
+        const env = makeSandbox({ store: { PRODloginData: SESSION }, routes: happyRoutes() });
+        const result = await env.api.runExport();
+        assert(env.calls.length > 0, '应该至少发出一个请求');
+        env.calls.forEach(function (c, i) {
+            const headers = c.headers || {};
+            assertEqual(headers['Ubi-LocaleCode'], 'en-US', '第 ' + (i + 1) + ' 个请求（' + c.url + '）的 Ubi-LocaleCode');
+        });
+        assertEqual(env.api.JSON_LANG, 'en-US', '导出的 JSON_LANG 常量');
+        const cjk = JSON.stringify(result).match(/[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/g);
+        assertEqual(cjk, null, '成功路径的 JSON 也不能有中文');
+    });
+
     await checkAsync('runExport 未登录时给出可操作提示且不发请求', async function () {
         const env = makeSandbox({ store: {}, routes: happyRoutes() });
         let message = '';

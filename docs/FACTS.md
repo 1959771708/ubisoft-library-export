@@ -1,6 +1,6 @@
 # 事实清单（机器生成，请勿手改）
 
-> 生成时间：2026-11-25T05:52:14.674Z　生成命令：`node tools/gen_facts.cjs`
+> 生成时间：2026-11-25T06:08:19.265Z　生成命令：`node tools/gen_facts.cjs`
 >
 > **本文件是文档中所有数字的唯一来源。** README 与 docs/ 的手写部分不得重复抄写这里的数值，
 > 只能引用本文件。改代码后重跑生成器，再跑 `node tools/check_docs.cjs` 体检。
@@ -23,7 +23,7 @@
 
 | 脚本 | 结果 |
 | --- | --- |
-| `tools/selftest.cjs` | TOTAL=**15** FAIL=**0** |
+| `tools/selftest.cjs` | TOTAL=**16** FAIL=**0** |
 
 ## 构建产物（本次实测）
 
