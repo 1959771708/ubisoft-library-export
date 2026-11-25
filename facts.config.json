@@ -24,8 +24,8 @@
     }
   ],
   "build": {
-    "command": "npm.cmd",
-    "args": ["run", "build"],
+    "command": "node",
+    "args": ["tools/build.cjs"],
     "distDir": "dist",
     "summaryPattern": "SUMMARY version=(\\S+) bytes=(\\d+)",
     "expectedWarnings": []
