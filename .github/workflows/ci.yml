@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    name: 自测 / 构建 / 文档体检
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # 本项目零依赖，不需要 npm install。
+      # 顺序有讲究：先构建产出 dist/，FACTS 才能记录产物字节，文档体检才有东西可核对。
+      - name: 版本与头部校验（构建）
+        run: node tools/build.cjs
+
+      - name: 自测台
+        run: node tools/selftest.cjs
+
+      - name: 生成事实清单
+        run: node tools/gen_facts.cjs
+
+      - name: 文档体检
+        run: node tools/check_docs.cjs
+
+      # 上面四步都过了，还要确认产物确实生成且与源码一致（防止构建被跳过）。
+      - name: 确认产物与源码一致
+        run: |
+          test -f dist/ubisoft-library-export.user.js
+          diff -q ubisoft-library-export.user.js dist/ubisoft-library-export.user.js
+          echo "dist 与源码一致"

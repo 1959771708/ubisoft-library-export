@@ -273,6 +273,17 @@ function testPureFunctions() {
         assertEqual(url.searchParams.get('genomeId'), null, '不能带 genomeId');
         assertEqual(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(api.LOGIN_APP_ID), true, 'appId 是合法 GUID');
     });
+
+    // 回归：默认 nexturl 是 https://ubisoft.com，那个域名按 IP 落到区域站（美国代理 → 美区），
+    // 脚本只在本域运行，于是在区域站没有按钮。必须显式把 nexturl 钉回本域。
+    check('登录 URL 把 nexturl 钉回本域，避免按 IP 落到区域站', function () {
+        const url = new URL(api.LOGIN_URL);
+        const nexturl = url.searchParams.get('nexturl');
+        assert(nexturl, '必须显式给 nexturl，否则默认跳到 ubisoft.com');
+        const target = new URL(nexturl);
+        assertEqual(target.origin, api.LOGIN_ORIGIN, 'nexturl 必须指回本域');
+        assertEqual(target.origin, url.origin, 'nexturl 与登录页同源');
+    });
 }
 
 // ── 主流程 ──────────────────────────────────────────────────────────────────
@@ -386,8 +397,19 @@ async function testRunExport() {
         const result = await env.api.runExport();
         assertEqual(result.summary.gameCount, 3, '游戏数不受影响');
         assertEqual(result.summary.unresolvedCount, 3, '全部未解析');
-        assert(result.summary.titleError && result.summary.titleError.indexOf('500') !== -1, '记录标题错误');
+        assert(result.summary.titleError && result.summary.titleError === 'HTTP_500', 'titleError 是英文错误码，实际：' + result.summary.titleError);
         assertEqual(result.games[0].spaceId, 'A', '按 spaceId 排序');
+    });
+
+    await checkAsync('导出的 JSON 全部英文（含降级路径）', async function () {
+        const routes = happyRoutes();
+        routes[2] = { url: '/v1/profiles/me/uplay/graphql', method: 'POST', status: 500, body: { error: 'boom' } };
+        const env = makeSandbox({ store: { PRODloginData: SESSION }, routes });
+        const result = await env.api.runExport();
+        const text = JSON.stringify(result);
+        const cjk = text.match(/[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/g);
+        assertEqual(cjk, null, 'JSON 里不能有中文，实际出现：' + (cjk ? cjk.join('') : ''));
+        assertEqual(result.summary.titleError, 'HTTP_500', '英文错误码');
     });
 
     await checkAsync('runExport 未登录时给出可操作提示且不发请求', async function () {

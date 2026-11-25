@@ -2,7 +2,7 @@
 // @name         育碧库存导出
 // @name:en      Ubisoft Library Export
 // @namespace    https://github.com/1959771708/ubisoft-library-export
-// @version      1.0.1
+// @version      1.0.2
 // @description  导出 Ubisoft Connect 账号的完整游戏库存（权益口径），输出 JSON 供第三方工具导入
 // @description:en  Export your complete Ubisoft Connect library, based on owned game entitlements.
 // @author       1959771708
@@ -29,10 +29,20 @@
     // 登录页必须带 appId，否则 SPA 会把自己导航到 /error（实测 /v2/webauth/public/config
     // 不带 appId 返回 invalid:true，带 genomeId 也返回 invalid:true）。
     // 根路径 https://connect.ubisoft.com/ 会 301 到官网营销页，也不是登录页。
-    // 不加 nexturl：登录成功后 SPA 会跳去它的默认值 https://ubisoft.com（本页随之离开）。
-    // 所以脚本用「新标签页打开登录页」的方式，让用户把这个页面留着点导出。
+    //
+    // 必须显式给 nexturl，否则登录成功后 SPA 跳到它的默认值 https://ubisoft.com，
+    // 而那个域名会按访问者 IP 落到区域站（用美国代理时是 www.ubisoft.com/en-us/…），
+    // 本脚本只在这一个域名上运行，于是在区域站看不到导出按钮。
+    // 实测 nexturl 的校验只要求「URL 合法 + 主机在 ubisoft.com 白名单内」，所以指回本域的
+    // /login 就能通过；而 /login 是该 SPA 根路由里唯一可停留的页面（根路由只有
+    // login / create / **→login 三条，其它路径都会被重定向回登录页）。
+    // 也实测了不会死循环：普通浏览器走 RedirectToNextUrl 的「未分区」分支，直接
+    // location.href = nexturl，不写 skipLoginFlowsOnLoad，因此回到 /login 只会正常渲染。
     const LOGIN_APP_ID = '1068ef52-dfd2-4e62-8ac9-37a47e6c0b78';
-    const LOGIN_URL = 'https://connect.ubisoft.com/login?appId=' + LOGIN_APP_ID;
+    const LOGIN_PATH = '/login?appId=' + LOGIN_APP_ID;
+    const LOGIN_ORIGIN = 'https://connect.ubisoft.com';
+    const LOGIN_URL = LOGIN_ORIGIN + LOGIN_PATH
+        + '&nexturl=' + encodeURIComponent(LOGIN_ORIGIN + LOGIN_PATH);
 
     const ENT_URL = 'https://api-ubiservices.ubi.com/v1/profiles/me/global/ubiconnect/entitlement/api/entitlements';
     const SESSION_URL = 'https://public-ubiservices.ubi.com/v2/profiles/sessions';
@@ -47,6 +57,11 @@
     // —— 所以这里用页面内 fetch 就够了，不需要 GM 请求（Epic 那边是必须 GM 的）。
     const TITLE_CHUNK = 120;
     const SCHEMA_VERSION = 1;
+
+    // 导出的 JSON 一律英文：键名本来就固定英文，标题由接口按 en-US 返回，
+    // 唯一曾混进中文的是把界面里的错误文案直接塞进了 summary.titleError，
+    // 所以那里改成英文错误码（详细中文原因只进界面日志）。
+    const JSON_LANG = 'en-US';
 
     const state = { running: false, result: null, startedAt: 0, ticker: null, requests: 0 };
 
@@ -115,7 +130,7 @@
             'Authorization': 'Ubi_v1 t=' + session.ticket,
             'Ubi-SessionId': session.sessionId,
             'Ubi-AppId': APP_ID,
-            'Ubi-LocaleCode': 'en-US',
+            'Ubi-LocaleCode': JSON_LANG,
             'Content-Type': 'application/json'
         };
     }
@@ -297,6 +312,14 @@
         return titles;
     }
 
+    // JSON 里要放英文，所以把错误翻译成稳定英文码；完整中文原因只进界面日志。
+    function titleErrorCodeOf(err) {
+        if (!err) return 'UNKNOWN';
+        if (err.status) return 'HTTP_' + err.status;
+        if (err.name === 'TypeError') return 'NETWORK_ERROR';
+        return 'UNKNOWN';
+    }
+
     async function runExport(session) {
         state.startedAt = Date.now();
         state.requests = 0;
@@ -320,6 +343,7 @@
         const spaceIds = ent.games.map(function (g) { return g.spaceId; });
         let titles = new Map();
         let titleError = null;
+        let titleErrorCode = null;
         if (spaceIds.length) {
             ui.progress(55, '读取标题');
             const t1 = Date.now();
@@ -330,6 +354,8 @@
             } catch (err) {
                 // 标题拿不到不该让整次导出失败：spaceId 本身仍是稳定主键
                 titleError = (err && err.message) ? err.message : String(err);
+                // JSON 里只放英文错误码，中文原因留在界面日志里
+                titleErrorCode = titleErrorCodeOf(err);
                 ui.log('  ! 标题读取失败，将只输出 spaceId：' + titleError);
             }
             stages.push({ name: '标题', ms: Date.now() - t1 });
@@ -371,7 +397,7 @@
                 excludedNotOwned: ent.stats.notOwned,
                 excludedExpired: ent.stats.expired,
                 unresolvedCount: unresolved,
-                titleError: titleError
+                titleError: titleErrorCode
             },
             games: games
         };
@@ -573,9 +599,13 @@
             classifyEntitlements: classifyEntitlements,
             collapseBySpaceId: collapseBySpaceId,
             collectPlatforms: collectPlatforms,
+            titleErrorCodeOf: titleErrorCodeOf,
             runExport: runExport,
             LOGIN_URL: LOGIN_URL,
+            LOGIN_PATH: LOGIN_PATH,
+            LOGIN_ORIGIN: LOGIN_ORIGIN,
             LOGIN_APP_ID: LOGIN_APP_ID,
+            JSON_LANG: JSON_LANG,
             state: state
         };
     }
